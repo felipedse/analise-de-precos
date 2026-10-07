@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: precos-postgres
+    environment:
+      POSTGRES_USER: precos
+      POSTGRES_PASSWORD: precos
+      POSTGRES_DB: precos
+    ports:
+      - "5432:5432"
+    volumes:
+      - precos-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U precos -d precos"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  precos-pgdata:
