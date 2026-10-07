@@ -1,0 +1,14 @@
+@import 'tailwindcss';
+
+/* Cores das lojas (paleta categórica validada; slot fixo por loja). */
+:root {
+  --serie-1: #2a78d6;
+  --serie-2: #eb6834;
+  --serie-3: #1baf7a;
+  color-scheme: light;
+}
+
+body {
+  @apply bg-stone-50 text-stone-900 antialiased;
+  font-feature-settings: 'tnum';
+}
