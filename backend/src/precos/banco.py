@@ -128,3 +128,13 @@ class Gravador:
             (status, self.total_precos, erros, mensagem, self.coleta_id),
         )
         await self.conn.commit()
+
+
+async def atualizar_analise(conn: psycopg.AsyncConnection) -> None:
+    """Recalcula a view materializada `preco_analise` (último preço por produto e loja)."""
+    await conn.commit()  # REFRESH ... CONCURRENTLY não roda dentro de transação aberta
+    await conn.set_autocommit(True)
+    try:
+        await conn.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY preco_analise")
+    finally:
+        await conn.set_autocommit(False)
