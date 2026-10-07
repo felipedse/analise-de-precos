@@ -1,9 +1,13 @@
 # Preços SC
 
-Coletor de preços de supermercados de Santa Catarina. Lê os catálogos públicos dos sites e grava
-uma série histórica de preços em um PostgreSQL local.
+Coletor de preços de supermercados de Santa Catarina. Lê os catálogos públicos dos sites, grava
+uma série histórica de preços em um PostgreSQL local e oferece uma interface para analisar os preços
+por loja e por categoria.
 
-Nesta primeira fase, o projeto só faz a **captura**. A API e a apresentação vêm depois.
+```
+backend/    coletor (CLI `precos`) + API FastAPI + amostra de dados versionada
+frontend/   interface React (Vite + TypeScript)
+```
 
 ## Redes suportadas
 
@@ -31,35 +35,62 @@ Para adicionar outra rede que use uma dessas plataformas, basta incluí-la em
 
 ## Como rodar
 
-Pré-requisitos: [uv](https://docs.astral.sh/uv/) e Docker (ou qualquer PostgreSQL 13+).
+Pré-requisitos: [uv](https://docs.astral.sh/uv/), Node 20+ e Docker (ou qualquer PostgreSQL 13+).
 
 ```bash
+docker compose up -d                 # PostgreSQL 16 em localhost:5432 (usuário/senha/banco: precos)
+
+cd backend
 cp .env.example .env
-docker compose up -d          # PostgreSQL 16 em localhost:5432 (usuário/senha/banco: precos)
 uv sync
-uv run precos init-db         # cria tabelas e views (idempotente)
-uv run precos coletar         # coleta todas as redes em paralelo
+uv run precos amostra carregar       # carrega a amostra versionada (Giassi + Angeloni)
+# ou, para coletar dados novos:
+uv run precos init-db                # cria tabelas e views (idempotente)
+uv run precos coletar                # coleta todas as redes em paralelo
+
+uv run precos api --recarregar       # API em http://127.0.0.1:8000 (docs em /docs)
+
+cd ../frontend
+npm install
+npm run dev                          # interface em http://localhost:5173
 ```
 
-Outros usos:
+Outros usos (em `backend/`):
 
 ```bash
 uv run precos redes                         # lista as redes
 uv run precos coletar giassi koch           # só algumas redes
 uv run precos coletar --limite 100 --dry-run   # teste rápido, sem gravar no banco
 uv run precos coletar --intervalo 0.5 --concorrencia 2   # mais devagar com os sites
-uv run pytest                               # testes
+uv run precos atualizar-analise             # recalcula a base analítica (a coleta já faz isso)
+uv run pytest                               # testes (os da API usam o banco precos_teste)
 ```
 
-Para usar outro banco, defina `DATABASE_URL` no `.env`.
+Para usar outro banco, defina `DATABASE_URL` no `.env` (e `DATABASE_URL_TESTE` para os testes).
+Com `npm run build`, o FastAPI também serve a interface em `http://127.0.0.1:8000/`.
 
 ### Agendamento
 
 Cada execução grava um novo ponto da série histórica. Para coletar todo dia às 6h, via cron:
 
 ```cron
-0 6 * * * cd "/caminho/para/analise de precos" && uv run precos coletar >> coleta.log 2>&1
+0 6 * * * cd "/caminho/para/analise de precos/backend" && uv run precos coletar >> coleta.log 2>&1
 ```
+
+## Interface
+
+- **Lojas**: tabela em árvore loja → categorias (todos os níveis) → produtos. Cada linha mostra
+  quantidade de produtos, itens e % em promoção, mínimo, média − 1σ, mediana, média, média + 1σ,
+  máximo, desvio padrão, desconto médio e uma barra de dispersão (mín.–máx., faixa ±1σ e mediana,
+  em escala log). Cabeçalhos ordenam; a linha de totais é calculada sobre todo o conjunto filtrado.
+- **Categorias**: menu lateral com a árvore de categorias. Para o nó escolhido mostra as estatísticas
+  por loja e "Todas as lojas", o histograma de preços por loja e as subcategorias lado a lado por loja.
+  Clicar numa categoria abre os produtos dela (incluindo subcategorias), com ordenação, paginação e totais.
+- **Filtros** (valem para as duas abas e ficam na URL): texto (nome, marca ou EAN), redes, lojas,
+  marcas, faixa de preço, só promoção e incluir indisponíveis.
+
+As categorias das redes são casadas pelo texto normalizado (sem acento, minúsculas): "Mercearia >
+Açúcar" no Giassi e no Angeloni viram o mesmo nó, mas nomes diferentes ficam separados.
 
 ## Modelo de dados
 
@@ -77,6 +108,8 @@ rede ─┬─< loja ──────────┐
 - `preco`: a série histórica, com uma linha por produto, loja e coleta. Guarda o preço efetivo
   (`preco`, já com promoção), o preço "de" (`preco_regular`), `em_promocao`, `disponivel` e `estoque`.
 - `preco_atual` (view): o último preço de cada produto em cada loja.
+- `preco_analise` (view materializada): o mesmo, com o caminho de categoria normalizado e campos
+  derivados (desconto, texto de busca). É a base da API e é recalculada ao fim de cada coleta.
 
 Consultas de exemplo:
 
@@ -112,20 +145,35 @@ LIMIT 10;
   total informado pela API.
 - **Estoque**: o VTEX devolve 99999 para "estoque ilimitado"; nesses casos o campo fica `NULL`.
 - Os sites podem mudar a estrutura a qualquer momento. Acompanhe `coleta.status` e `coleta.erros`.
+- **Dispersão por embalagem**: as estatísticas usam o preço de venda, sem converter para preço por
+  kg/L (os sites não informam o tamanho de forma estruturada). Categorias com tamanhos variados têm
+  desvio alto, e média − 1σ pode ficar negativa quando a distribuição é muito assimétrica.
+- **Categorias entre redes**: o casamento é só pelo nome normalizado; não há taxonomia unificada.
+  Koch e Fort aparecem em "Sem categoria".
+- `preco_analise` é criada com `IF NOT EXISTS`: se a definição dela mudar, é preciso
+  `DROP MATERIALIZED VIEW preco_analise` antes do `init-db`.
 
 ## Estrutura
 
 ```
-src/precos/
-  cli.py            # comandos: init-db, redes, coletar
-  coleta.py         # orquestra uma coleta (coletor -> gravador)
-  banco.py          # conexão, schema e gravação (upsert de produtos + COPY de preços)
-  schema.sql        # tabelas e views
-  redes.py          # redes cadastradas
-  http.py           # cliente HTTP com limite de taxa e novas tentativas
-  modelos.py        # Rede, Loja, Oferta
-  coletores/
-    vtex.py         # Angeloni, Giassi, Bistek
-    osuper.py       # Koch, Fort Atacadista
-tests/              # testes dos parsers
+backend/
+  src/precos/
+    cli.py            # comandos: init-db, redes, coletar, atualizar-analise, amostra, api
+    coleta.py         # orquestra uma coleta (coletor -> gravador)
+    banco.py          # conexão, schema e gravação (upsert de produtos + COPY de preços)
+    schema.sql        # tabelas, views e a base analítica preco_analise
+    amostra.py        # exporta/carrega a amostra versionada
+    redes.py          # redes cadastradas
+    http.py           # cliente HTTP com limite de taxa e novas tentativas
+    modelos.py        # Rede, Loja, Oferta
+    coletores/        # vtex.py (Angeloni, Giassi, Bistek), osuper.py (Koch, Fort)
+    api/              # FastAPI: app.py, rotas.py, filtros.py, estatisticas.py
+  amostra/            # CSVs .gz da amostra (Giassi + Angeloni)
+  tests/              # parsers, banco, amostra e API
+frontend/
+  src/
+    App.tsx           # layout, abas e rotas
+    filtros/          # barra de filtros (estado na URL)
+    componentes/      # tabelas, barra de dispersão, ordenação
+    paginas/          # Lojas.tsx, Categorias.tsx e categorias/ (menu, dispersão, histograma)
 ```
